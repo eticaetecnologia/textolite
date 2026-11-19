@@ -555,7 +555,13 @@ fun SettingsScreen(settings: Settings, onDone: () -> Unit) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = { cUrl = "https://openrouter.ai/api/v1" }, modifier = Modifier.weight(1f)) { Text("OpenRouter") }
             OutlinedButton(onClick = { cUrl = "https://api.groq.com/openai/v1" }, modifier = Modifier.weight(1f)) { Text("Groq") }
-            OutlinedButton(onClick = { cUrl = "https://api.openai.com/v1" }, modifier = Modifier.weight(1f)) { Text("OpenAI") }
+            OutlinedButton(
+                onClick = {
+                    cUrl = "https://api.openai.com/v1"
+                    if (cModel.isBlank()) cModel = "gpt-5-mini"
+                },
+                modifier = Modifier.weight(1f)
+            ) { Text("OpenAI") }
         }
         OutlinedTextField(
             value = cUrl, onValueChange = { cUrl = it }, singleLine = true,
@@ -582,6 +588,12 @@ fun SettingsScreen(settings: Settings, onDone: () -> Unit) {
             onClick = {
                 if (cUrl.isNotBlank() && !cUrl.trim().startsWith("https://")) {
                     msg = "O endereço da outra IA precisa começar com https://"
+                } else if (cKey.isNotBlank() && cModel.isBlank()) {
+                    msg = "Falta o nome do modelo da outra IA (precisa aceitar imagens). Sem ele, a IA não é ativada."
+                } else if (cKey.isNotBlank() && cUrl.isBlank()) {
+                    msg = "Falta o endereço da outra IA. Use um dos atalhos acima."
+                } else if (gKey.isNotBlank() && gModel.isBlank()) {
+                    msg = "Falta o nome do modelo do Gemini."
                 } else {
                     settings.geminiKey = gKey.trim()
                     settings.geminiModel = gModel.trim()

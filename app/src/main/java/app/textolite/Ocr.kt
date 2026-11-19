@@ -242,19 +242,26 @@ object Ocr {
                         JSONObject().put("url", "data:image/jpeg;base64," + toBase64Jpeg(bmp))
                     )
                 )
-            val body = JSONObject()
-                .put("model", model.trim())
-                .put("temperature", 0)
-                .put(
+            fun body(withTemperature: Boolean): String {
+                val j = JSONObject().put("model", model.trim())
+                if (withTemperature) j.put("temperature", 0)
+                j.put(
                     "messages", JSONArray().put(
                         JSONObject().put("role", "user").put("content", content)
                     )
                 )
-            val resp = post(
-                baseUrl.trim().trimEnd('/') + "/chat/completions",
-                mapOf("Authorization" to "Bearer " + key.trim()),
-                body.toString()
-            )
+                return j.toString()
+            }
+            val url = baseUrl.trim().trimEnd('/') + "/chat/completions"
+            val headers = mapOf("Authorization" to "Bearer " + key.trim())
+            // Modelos novos da OpenAI (família GPT-5, o1/o3...) recusam "temperature": tenta de novo sem ela.
+            val resp = try {
+                post(url, headers, body(true))
+            } catch (e: ApiError) {
+                if (e.code == 400 && e.body.contains("temperature", ignoreCase = true)) {
+                    post(url, headers, body(false))
+                } else throw e
+            }
             val text = JSONObject(resp)
                 .getJSONArray("choices").getJSONObject(0)
                 .getJSONObject("message").optString("content")
@@ -286,18 +293,30 @@ object Ocr {
             val code = c.responseCode
             val stream = if (code in 200..299) c.inputStream else c.errorStream
             val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
-            if (code !in 200..299) throw IOException(friendly(code))
+            if (code !in 200..299) throw ApiError(code, text)
             return text
         } finally {
             c.disconnect()
         }
     }
 
-    private fun friendly(code: Int): String = when (code) {
-        400 -> "A IA recusou o pedido (erro 400). Verifique o nome do modelo."
+}
+
+/** Erro devolvido pelo serviço de IA, com a mensagem original dele para facilitar o diagnóstico. */
+class ApiError(val code: Int, val body: String) : IOException(describe(code, body))
+
+private fun describe(code: Int, body: String): String {
+    val base = when (code) {
+        400 -> "A IA recusou o pedido (erro 400). Confira o nome do modelo e se ele aceita imagens."
         401, 403 -> "Chave de API inválida ou sem permissão (erro $code)."
-        404 -> "Modelo ou endereço não encontrado (erro 404). Verifique o nome do modelo."
-        429 -> "Limite gratuito atingido (erro 429). Tente novamente mais tarde."
+        404 -> "Modelo ou endereço não encontrado (erro 404). Confira o nome do modelo."
+        429 -> "Limite ou crédito esgotado (erro 429). Tente mais tarde ou confira o saldo da conta."
         else -> "Erro do serviço de IA (código $code)."
     }
+    val detail = try {
+        JSONObject(body).optJSONObject("error")?.optString("message") ?: ""
+    } catch (e: Exception) {
+        ""
+    }
+    return if (detail.isBlank()) base else base + "\nDetalhe do serviço: " + detail.take(220)
 }
