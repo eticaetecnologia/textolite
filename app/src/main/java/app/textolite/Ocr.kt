@@ -29,9 +29,13 @@ object Ocr {
     private const val PROMPT =
         "Transcreva fielmente todo o conteúdo desta imagem para Markdown, no idioma original. " +
         "Inclua texto impresso e manuscrito. " +
-        "Use tabelas Markdown para tabelas, listas para listas e títulos (#) para títulos. " +
-        "Para esquemas, setas e marcações manuscritas (sublinhado, riscado, destaque), " +
-        "represente com **negrito**, ~~riscado~~, setas (→) e indentação. " +
+        "Reproduza a estrutura com Markdown: títulos e subtítulos com # e ##, **negrito**, *itálico*, " +
+        "~~riscado~~, listas com - ou 1., citações com >, e tabelas Markdown. " +
+        "Notas de rodapé: coloque a chamada no texto como [^1] e, ao final da página, " +
+        "a nota em uma linha própria no formato [^1]: texto da nota. " +
+        "Número de página impresso: escreva em linha própria no formato [p. 12]. " +
+        "Para esquemas, setas e marcações manuscritas (sublinhado, destaque), " +
+        "use **negrito**, setas (→) e indentação. " +
         "Se for um gabarito ou lista de respostas, escreva uma linha por questão, ex.: 1. A. " +
         "Não invente nem corrija texto; use [ilegível] quando não der para ler. " +
         "Responda somente com o Markdown, sem comentários."
