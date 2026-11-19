@@ -1,5 +1,6 @@
 package app.textolite
 
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -12,6 +13,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -49,6 +51,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -97,7 +102,7 @@ fun App() {
     val pages = remember { mutableStateListOf<Page>() }
     var current by remember { mutableStateOf(0) }
     var cropIndex by remember { mutableStateOf(0) }
-    var withImages by remember { mutableStateOf(false) }
+    var content by remember { mutableStateOf(Content.TEXT) }
     var busy by remember { mutableStateOf(false) }
     var progress by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -219,13 +224,12 @@ fun App() {
         }
     }
 
-    fun export(uri: Uri, make: (List<Page>, Boolean) -> ByteArray) {
+    fun export(uri: Uri, what: Content, make: (List<Page>, Content) -> ByteArray) {
         val snapshot = pages.toList()
-        val imgs = withImages
         busy = true
         scope.launch {
             try {
-                val bytes = withContext(Dispatchers.IO) { make(snapshot, imgs) }
+                val bytes = withContext(Dispatchers.IO) { make(snapshot, what) }
                 saveBytes(ctx, uri, bytes)
             } catch (e: Exception) {
                 Toast.makeText(ctx, "Falha ao exportar: ${e.message}", Toast.LENGTH_LONG).show()
@@ -249,15 +253,43 @@ fun App() {
         if (uris.isNotEmpty()) addPages(uris)
     }
     val saveMd = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri ->
-        if (uri != null) export(uri, Export::md)
+        if (uri != null) export(uri, content, Export::md)
     }
     val saveFodt = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/vnd.oasis.opendocument.text-flat-xml")
     ) { uri ->
-        if (uri != null) export(uri, Export::fodt)
+        if (uri != null) export(uri, content, Export::fodt)
     }
     val savePdf = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
-        if (uri != null) export(uri, Export::pdf)
+        if (uri != null) export(uri, content, Export::pdf)
+    }
+    val savePdfScan = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
+        if (uri != null) export(uri, Content.IMAGE, Export::pdf)
+    }
+    val scanLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { res ->
+        if (res.resultCode == Activity.RESULT_OK) {
+            val r = GmsDocumentScanningResult.fromActivityResultIntent(res.data)
+            val uris = r?.pages?.map { it.imageUri } ?: emptyList()
+            if (uris.isNotEmpty()) addPages(uris)
+        }
+    }
+
+    fun startScanner() {
+        val activity = ctx as? Activity
+        if (activity == null) {
+            error = "Não foi possível abrir o scanner."
+            return
+        }
+        val options = GmsDocumentScannerOptions.Builder()
+            .setGalleryImportAllowed(true)
+            .setResultFormats(GmsDocumentScannerOptions.RESULT_FORMAT_JPEG)
+            .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
+            .build()
+        GmsDocumentScanning.getClient(options).getStartScanIntent(activity)
+            .addOnSuccessListener { sender -> scanLauncher.launch(IntentSenderRequest.Builder(sender).build()) }
+            .addOnFailureListener { e ->
+                error = "Scanner indisponível neste aparelho (precisa do Google Play Services): ${e.message}"
+            }
     }
 
     Scaffold { padding ->
@@ -271,6 +303,8 @@ fun App() {
                     busy = busy,
                     progress = progress,
                     error = error,
+                    onScan = { startScanner() },
+                    onSavePdfScan = { savePdfScan.launch("scan-${stamp()}.pdf") },
                     onCamera = { takePicture.launch(photoUri) },
                     onGallery = {
                         pickImages.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
@@ -286,8 +320,8 @@ fun App() {
                     pages = pages,
                     index = current,
                     onIndex = { current = it },
-                    withImages = withImages,
-                    onWithImages = { withImages = it },
+                    content = content,
+                    onContent = { content = it },
                     busy = busy,
                     onMd = { saveMd.launch("textolite-${stamp()}.md") },
                     onFodt = { saveFodt.launch("textolite-${stamp()}.fodt") },
@@ -342,6 +376,8 @@ fun HomeScreen(
     busy: Boolean,
     progress: String?,
     error: String?,
+    onScan: () -> Unit,
+    onSavePdfScan: () -> Unit,
     onCamera: () -> Unit,
     onGallery: () -> Unit,
     onFiles: () -> Unit,
@@ -389,8 +425,11 @@ fun HomeScreen(
             }
         }
 
+        Button(onClick = onScan, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+            Text("Digitalizar documento (scanner)")
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onCamera, enabled = !busy, modifier = Modifier.weight(1f)) {
+            OutlinedButton(onClick = onCamera, enabled = !busy, modifier = Modifier.weight(1f)) {
                 Text(if (pages.isEmpty()) "Tirar foto" else "Adicionar foto")
             }
             OutlinedButton(onClick = onGallery, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Galeria") }
@@ -435,6 +474,12 @@ fun HomeScreen(
             modifier = Modifier.fillMaxWidth()
         ) { Text(if (pages.size > 1) "Reconhecer ${pages.size} páginas" else "Reconhecer texto") }
 
+        OutlinedButton(
+            onClick = onSavePdfScan,
+            enabled = pages.isNotEmpty() && !busy,
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Salvar PDF sem reconhecer (só imagens)") }
+
         if (pages.isNotEmpty()) {
             TextButton(onClick = onClear, enabled = !busy) { Text("Limpar tudo e começar de novo") }
         }
@@ -450,8 +495,8 @@ fun ResultScreen(
     pages: List<Page>,
     index: Int,
     onIndex: (Int) -> Unit,
-    withImages: Boolean,
-    onWithImages: (Boolean) -> Unit,
+    content: Content,
+    onContent: (Content) -> Unit,
     busy: Boolean,
     onMd: () -> Unit,
     onFodt: () -> Unit,
@@ -492,9 +537,13 @@ fun ResultScreen(
         )
 
         Text("O arquivo deve conter", style = MaterialTheme.typography.titleSmall)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(selected = !withImages, onClick = { onWithImages(false) }, label = { Text("Só o texto") })
-            FilterChip(selected = withImages, onClick = { onWithImages(true) }, label = { Text("Texto + imagem original") })
+        Row(
+            Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            FilterChip(selected = content == Content.TEXT, onClick = { onContent(Content.TEXT) }, label = { Text("Só o texto") })
+            FilterChip(selected = content == Content.TEXT_IMAGE, onClick = { onContent(Content.TEXT_IMAGE) }, label = { Text("Texto + imagem original") })
+            FilterChip(selected = content == Content.IMAGE, onClick = { onContent(Content.IMAGE) }, label = { Text("Só imagens") })
         }
 
         Text("Salvar como", style = MaterialTheme.typography.titleSmall)

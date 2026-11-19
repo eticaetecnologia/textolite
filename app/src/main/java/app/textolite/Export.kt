@@ -23,7 +23,10 @@ import java.io.File
 import java.io.IOException
 import java.util.Locale
 
-/** Converte as páginas em .md, .fodt e .pdf, só com o texto ou com a imagem original de cada página. */
+/** O que vai dentro do arquivo exportado. */
+enum class Content { TEXT, TEXT_IMAGE, IMAGE }
+
+/** Converte as páginas em .md, .fodt e .pdf: só texto, texto + imagem original, ou só imagens. */
 object Export {
 
     private fun xml(s: String): String =
@@ -61,7 +64,9 @@ object Export {
     // ---------- .md ----------
 
     /** Com imagens, elas vão embutidas no próprio arquivo (nem todo editor as exibe). */
-    fun md(pages: List<Page>, withImages: Boolean): ByteArray {
+    fun md(pages: List<Page>, content: Content): ByteArray {
+        val withImages = content != Content.TEXT
+        val withText = content != Content.IMAGE
         val sb = StringBuilder()
         pages.forEachIndexed { i, p ->
             if (i > 0) sb.append("\n\n---\n\n")
@@ -69,7 +74,7 @@ object Export {
                 val im = img(p.file, 1200, 70)
                 sb.append("![Página ${i + 1}](data:image/jpeg;base64,${im.b64})\n\n")
             }
-            sb.append(p.text.trim())
+            if (withText) sb.append(p.text.trim())
         }
         return sb.toString().toByteArray(Charsets.UTF_8)
     }
@@ -174,7 +179,9 @@ object Export {
         }
     }
 
-    fun fodt(pages: List<Page>, withImages: Boolean): ByteArray {
+    fun fodt(pages: List<Page>, content: Content): ByteArray {
+        val withImages = content != Content.TEXT
+        val withText = content != Content.IMAGE
         val body = StringBuilder()
         val styles = mutableSetOf<String>()
         val noteCounter = intArrayOf(0)
@@ -182,7 +189,7 @@ object Export {
         val multi = pages.size > 1
 
         pages.forEachIndexed { i, p ->
-            if (multi) {
+            if (multi && withText) {
                 val style = if (i > 0) " text:style-name=\"PB\"" else ""
                 body.append("<text:p").append(style).append(">Página ").append(i + 1).append("</text:p>")
             }
@@ -192,12 +199,14 @@ object Export {
                 val hCm = wCm * im.h / im.w
                 val w = String.format(Locale.US, "%.2f", wCm)
                 val h = String.format(Locale.US, "%.2f", hCm)
-                body.append("<text:p><draw:frame draw:name=\"Imagem").append(i + 1)
+                val imgStyle = if (!withText && i > 0) " text:style-name=\"PB\"" else ""
+                body.append("<text:p").append(imgStyle).append("><draw:frame draw:name=\"Imagem").append(i + 1)
                     .append("\" text:anchor-type=\"as-char\" svg:width=\"").append(w)
                     .append("cm\" svg:height=\"").append(h).append("cm\">")
                 body.append("<draw:image><office:binary-data>").append(im.b64)
                     .append("</office:binary-data></draw:image></draw:frame></text:p>")
             }
+            if (!withText) return@forEachIndexed
             val doc = Markdown.parse(p.text)
             for (b in doc.blocks) appendBlock(body, b, doc.notes, styles, noteCounter, tableCounter)
 
@@ -269,7 +278,9 @@ object Export {
         return sb
     }
 
-    fun pdf(pages: List<Page>, withImages: Boolean): ByteArray {
+    fun pdf(pages: List<Page>, content: Content): ByteArray {
+        if (content == Content.IMAGE) return PdfImages.build(pages.map { it.file })
+        val withImages = content == Content.TEXT_IMAGE
         val pageW = 595
         val pageH = 842
         val margin = 40
