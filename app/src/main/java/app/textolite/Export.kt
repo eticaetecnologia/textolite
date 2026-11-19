@@ -1,13 +1,21 @@
 package app.textolite
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
 import android.text.StaticLayout
 import android.text.TextPaint
+import android.util.Base64
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.IOException
+import java.util.Locale
 
-/** Converte o Markdown em .md, .fodt e .pdf. */
+/** Converte as páginas em .md, .fodt e .pdf, só com o texto ou com a imagem original de cada página. */
 object Export {
 
     private fun isTableRow(line: String) = line.trim().let { it.startsWith("|") && it.endsWith("|") && it.length > 1 }
@@ -22,32 +30,56 @@ object Export {
     private fun xml(s: String): String =
         s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+    // ---------- Imagens ----------
+
+    private class Img(val b64: String, val w: Int, val h: Int)
+
+    private fun decode(file: File, maxSide: Int): Bitmap {
+        val b = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.path, b)
+        var s = 1
+        while (maxOf(b.outWidth, b.outHeight) / (s * 2) >= maxSide) s *= 2
+        val o = BitmapFactory.Options().apply { inSampleSize = s }
+        val bmp = BitmapFactory.decodeFile(file.path, o) ?: throw IOException("Imagem da página indisponível.")
+        return scaleTo(bmp, maxSide)
+    }
+
+    private fun scaleTo(b: Bitmap, maxSide: Int): Bitmap {
+        val s = maxSide.toFloat() / maxOf(b.width, b.height)
+        if (s >= 1f) return b
+        return Bitmap.createScaledBitmap(
+            b, (b.width * s).toInt().coerceAtLeast(1), (b.height * s).toInt().coerceAtLeast(1), true
+        )
+    }
+
+    private fun img(file: File, maxSide: Int, quality: Int): Img {
+        val bmp = decode(file, maxSide)
+        val out = ByteArrayOutputStream()
+        bmp.compress(Bitmap.CompressFormat.JPEG, quality, out)
+        return Img(Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP), bmp.width, bmp.height)
+    }
+
     // ---------- .md ----------
 
-    fun md(text: String): ByteArray = text.toByteArray(Charsets.UTF_8)
+    /** Com imagens, elas vão embutidas no próprio arquivo (nem todo editor as exibe). */
+    fun md(pages: List<Page>, withImages: Boolean): ByteArray {
+        val sb = StringBuilder()
+        pages.forEachIndexed { i, p ->
+            if (i > 0) sb.append("\n\n---\n\n")
+            if (withImages) {
+                val im = img(p.file, 1200, 70)
+                sb.append("![Página ${i + 1}](data:image/jpeg;base64,${im.b64})\n\n")
+            }
+            sb.append(p.text.trim())
+        }
+        return sb.toString().toByteArray(Charsets.UTF_8)
+    }
 
     // ---------- .fodt (LibreOffice / OpenDocument) ----------
 
-    fun fodt(markdown: String): ByteArray {
-        val sb = StringBuilder()
-        sb.append("""<?xml version="1.0" encoding="UTF-8"?>""").append('\n')
-        sb.append(
-            """<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" """ +
-            """xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" """ +
-            """xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" """ +
-            """xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" """ +
-            """xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" """ +
-            """office:version="1.3" office:mimetype="application/vnd.oasis.opendocument.text">"""
-        ).append('\n')
-        sb.append("<office:automatic-styles>")
-        sb.append("""<style:style style:name="Tbl" style:family="table"><style:table-properties style:width="17cm" table:align="margins"/></style:style>""")
-        sb.append("""<style:style style:name="Cel" style:family="table-cell"><style:table-cell-properties fo:padding="0.1cm" fo:border="0.5pt solid #000000"/></style:style>""")
-        sb.append("</office:automatic-styles>")
-        sb.append("<office:body><office:text>")
-
+    private fun appendBody(sb: StringBuilder, markdown: String, tableCounter: IntArray) {
         val lines = markdown.lines()
         var i = 0
-        var tableCount = 0
         while (i < lines.size) {
             val line = lines[i]
             if (isTableRow(line)) {
@@ -57,8 +89,8 @@ object Export {
                     i++
                 }
                 val cols = rows.maxOfOrNull { it.size } ?: 1
-                tableCount++
-                sb.append("""<table:table table:name="Tabela$tableCount" table:style-name="Tbl">""")
+                tableCounter[0]++
+                sb.append("""<table:table table:name="Tabela${tableCounter[0]}" table:style-name="Tbl">""")
                 sb.append("""<table:table-column table:number-columns-repeated="$cols"/>""")
                 for (r in rows) {
                     sb.append("<table:table-row>")
@@ -87,13 +119,54 @@ object Export {
             }
             i++
         }
+    }
+
+    fun fodt(pages: List<Page>, withImages: Boolean): ByteArray {
+        val sb = StringBuilder()
+        sb.append("""<?xml version="1.0" encoding="UTF-8"?>""").append('\n')
+        sb.append(
+            """<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" """ +
+            """xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" """ +
+            """xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" """ +
+            """xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" """ +
+            """xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" """ +
+            """xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" """ +
+            """xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" """ +
+            """office:version="1.3" office:mimetype="application/vnd.oasis.opendocument.text">"""
+        ).append('\n')
+        sb.append("<office:automatic-styles>")
+        sb.append("""<style:style style:name="Tbl" style:family="table"><style:table-properties style:width="17cm" table:align="margins"/></style:style>""")
+        sb.append("""<style:style style:name="Cel" style:family="table-cell"><style:table-cell-properties fo:padding="0.1cm" fo:border="0.5pt solid #000000"/></style:style>""")
+        sb.append("""<style:style style:name="PB" style:family="paragraph"><style:paragraph-properties fo:break-before="page"/></style:style>""")
+        sb.append("</office:automatic-styles>")
+        sb.append("<office:body><office:text>")
+
+        val multi = pages.size > 1
+        val tableCounter = intArrayOf(0)
+        pages.forEachIndexed { i, p ->
+            if (multi) {
+                val style = if (i > 0) """ text:style-name="PB"""" else ""
+                sb.append("<text:p$style>Página ${i + 1}</text:p>")
+            }
+            if (withImages) {
+                val im = img(p.file, 1600, 80)
+                val wCm = minOf(17.0, 22.0 * im.w / im.h)
+                val hCm = wCm * im.h / im.w
+                val w = String.format(Locale.US, "%.2f", wCm)
+                val h = String.format(Locale.US, "%.2f", hCm)
+                sb.append("<text:p><draw:frame draw:name=\"Imagem${i + 1}\" text:anchor-type=\"as-char\" svg:width=\"${w}cm\" svg:height=\"${h}cm\">")
+                sb.append("<draw:image><office:binary-data>${im.b64}</office:binary-data></draw:image>")
+                sb.append("</draw:frame></text:p>")
+            }
+            appendBody(sb, p.text, tableCounter)
+        }
         sb.append("</office:text></office:body></office:document>")
         return sb.toString().toByteArray(Charsets.UTF_8)
     }
 
     // ---------- .pdf ----------
 
-    fun pdf(markdown: String): ByteArray {
+    fun pdf(pages: List<Page>, withImages: Boolean): ByteArray {
         val pageW = 595
         val pageH = 842
         val margin = 40
@@ -125,18 +198,37 @@ object Export {
             y += layout.height + spacing
         }
 
-        for (line in markdown.lines()) {
-            val t = line.trim()
-            when {
-                t.isEmpty() -> y += 6f
-                isTableRow(t) -> if (!isSeparator(t)) draw(cells(t).joinToString("  |  "), mono, 3f)
-                t.startsWith("#") -> {
-                    val level = t.takeWhile { it == '#' }.length
-                    val size = when (level) { 1 -> 18f; 2 -> 15f; else -> 13f }
-                    draw(plain(t.dropWhile { it == '#' }.trim()), heading(size), 6f)
+        fun drawImage(file: File) {
+            val bmp = decode(file, 1600)
+            val boxW = (pageW - 2 * margin).toFloat()
+            val boxH = (pageH - 2 * margin).toFloat()
+            val s = minOf(boxW / bmp.width, boxH / bmp.height)
+            val w = bmp.width * s
+            val h = bmp.height * s
+            val left = margin + (boxW - w) / 2
+            val top = margin + (boxH - h) / 2
+            page.canvas.drawBitmap(bmp, null, RectF(left, top, left + w, top + h), Paint(Paint.FILTER_BITMAP_FLAG))
+        }
+
+        pages.forEachIndexed { index, p ->
+            if (index > 0) newPage()
+            if (withImages) {
+                drawImage(p.file)
+                newPage()
+            }
+            for (line in p.text.lines()) {
+                val t = line.trim()
+                when {
+                    t.isEmpty() -> y += 6f
+                    isTableRow(t) -> if (!isSeparator(t)) draw(cells(t).joinToString("  |  "), mono, 3f)
+                    t.startsWith("#") -> {
+                        val level = t.takeWhile { it == '#' }.length
+                        val size = when (level) { 1 -> 18f; 2 -> 15f; else -> 13f }
+                        draw(plain(t.dropWhile { it == '#' }.trim()), heading(size), 6f)
+                    }
+                    t.startsWith("- ") || t.startsWith("* ") -> draw("• " + plain(t.drop(2)), body, 3f)
+                    else -> draw(plain(t), body, 4f)
                 }
-                t.startsWith("- ") || t.startsWith("* ") -> draw("• " + plain(t.drop(2)), body, 3f)
-                else -> draw(plain(t), body, 4f)
             }
         }
         doc.finishPage(page)

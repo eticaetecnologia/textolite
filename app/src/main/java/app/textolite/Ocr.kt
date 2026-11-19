@@ -17,6 +17,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
@@ -70,6 +71,24 @@ object Ocr {
         if (scale < 1f) m.postScale(scale, scale)
         if (!m.isIdentity) bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
         return bmp
+    }
+
+    /** Guarda a foto como uma página do documento (arquivo JPEG + miniatura). */
+    fun savePage(ctx: Context, uri: Uri): Page {
+        val bmp = loadBitmap(ctx, uri)
+        val dir = File(ctx.cacheDir, "pages").apply { mkdirs() }
+        val file = File(dir, "p${System.nanoTime()}.jpg")
+        file.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+        val s = 360f / maxOf(bmp.width, bmp.height)
+        val thumb = if (s < 1f) {
+            Bitmap.createScaledBitmap(
+                bmp,
+                (bmp.width * s).toInt().coerceAtLeast(1),
+                (bmp.height * s).toInt().coerceAtLeast(1),
+                true
+            )
+        } else bmp
+        return Page(file, thumb)
     }
 
     private fun toBase64Jpeg(bmp: Bitmap): String {

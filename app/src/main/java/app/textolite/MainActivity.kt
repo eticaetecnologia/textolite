@@ -4,7 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
@@ -15,6 +15,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -36,6 +37,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -43,7 +45,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -52,6 +53,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -92,19 +94,24 @@ fun App() {
 
     var screen by remember { mutableStateOf(Screen.HOME) }
     var engine by remember { mutableStateOf(settings.engine) }
-    var bitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var text by remember { mutableStateOf("") }
+    val pages = remember { mutableStateListOf<Page>() }
+    var current by remember { mutableStateOf(0) }
+    var withImages by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
+    var progress by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
 
     BackHandler(enabled = screen != Screen.HOME) { screen = Screen.HOME }
 
-    fun load(uri: Uri) {
+    fun addPages(uris: List<Uri>) {
         busy = true
         error = null
         scope.launch {
             try {
-                bitmap = withContext(Dispatchers.IO) { Ocr.loadBitmap(ctx, uri) }
+                for (u in uris) {
+                    val p = withContext(Dispatchers.IO) { Ocr.savePage(ctx, u) }
+                    pages.add(p)
+                }
             } catch (e: Exception) {
                 error = e.message ?: "Não foi possível abrir a imagem."
             } finally {
@@ -113,20 +120,61 @@ fun App() {
         }
     }
 
+    fun removePage(i: Int) {
+        if (i in pages.indices) {
+            pages[i].file.delete()
+            pages.removeAt(i)
+        }
+    }
+
+    fun clearAll() {
+        pages.forEach { it.file.delete() }
+        pages.clear()
+        current = 0
+        error = null
+    }
+
     fun recognize() {
-        val b = bitmap ?: return
         busy = true
         error = null
         scope.launch {
+            var idx = 0
             try {
-                text = when (engine) {
-                    Engine.OFFLINE -> Ocr.offline(b)
-                    Engine.GEMINI -> Ocr.gemini(b, settings.geminiKey, settings.geminiModel)
-                    Engine.COMPAT -> Ocr.compat(b, settings.compatUrl, settings.compatKey, settings.compatModel)
+                for (i in pages.indices) {
+                    idx = i
+                    val p = pages[i]
+                    if (p.text.isBlank()) {
+                        progress = "Reconhecendo página ${i + 1} de ${pages.size}…"
+                        val b = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(p.file.path) }
+                            ?: throw IOException("Imagem indisponível.")
+                        p.text = when (engine) {
+                            Engine.OFFLINE -> Ocr.offline(b)
+                            Engine.GEMINI -> Ocr.gemini(b, settings.geminiKey, settings.geminiModel)
+                            Engine.COMPAT -> Ocr.compat(b, settings.compatUrl, settings.compatKey, settings.compatModel)
+                        }
+                    }
                 }
+                current = 0
                 screen = Screen.RESULT
             } catch (e: Exception) {
-                error = e.message ?: "Erro ao reconhecer o texto."
+                error = "Página ${idx + 1}: " + (e.message ?: "erro ao reconhecer o texto.")
+            } finally {
+                busy = false
+                progress = null
+            }
+        }
+    }
+
+    fun export(uri: Uri, make: (List<Page>, Boolean) -> ByteArray) {
+        val snapshot = pages.toList()
+        val imgs = withImages
+        busy = true
+        scope.launch {
+            try {
+                val bytes = withContext(Dispatchers.IO) { make(snapshot, imgs) }
+                saveBytes(ctx, uri, bytes)
+            } catch (e: Exception) {
+                Toast.makeText(ctx, "Falha ao exportar: ${e.message}", Toast.LENGTH_LONG).show()
             } finally {
                 busy = false
             }
@@ -138,21 +186,21 @@ fun App() {
         FileProvider.getUriForFile(ctx, "${ctx.packageName}.files", File(dir, "captura.jpg"))
     }
     val takePicture = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
-        if (ok) load(photoUri)
+        if (ok) addPages(listOf(photoUri))
     }
-    val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) load(uri)
+    val pickImages = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris ->
+        if (uris.isNotEmpty()) addPages(uris)
     }
     val saveMd = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri ->
-        if (uri != null) saveBytes(ctx, uri, Export.md(text))
+        if (uri != null) export(uri, Export::md)
     }
     val saveFodt = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/vnd.oasis.opendocument.text-flat-xml")
     ) { uri ->
-        if (uri != null) saveBytes(ctx, uri, Export.fodt(text))
+        if (uri != null) export(uri, Export::fodt)
     }
     val savePdf = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
-        if (uri != null) saveBytes(ctx, uri, Export.pdf(text))
+        if (uri != null) export(uri, Export::pdf)
     }
 
     Scaffold { padding ->
@@ -162,31 +210,39 @@ fun App() {
                     settings = settings,
                     engine = engine,
                     onEngine = { engine = it; settings.engine = it },
-                    bitmap = bitmap,
+                    pages = pages,
                     busy = busy,
+                    progress = progress,
                     error = error,
                     onCamera = { takePicture.launch(photoUri) },
                     onGallery = {
-                        pickImage.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        pickImages.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                     },
+                    onRemove = { removePage(it) },
+                    onClear = { clearAll() },
                     onRecognize = { recognize() },
                     onSettings = { screen = Screen.SETTINGS }
                 )
                 Screen.RESULT -> ResultScreen(
-                    text = text,
-                    onText = { text = it },
+                    pages = pages,
+                    index = current,
+                    onIndex = { current = it },
+                    withImages = withImages,
+                    onWithImages = { withImages = it },
+                    busy = busy,
                     onMd = { saveMd.launch("textolite-${stamp()}.md") },
                     onFodt = { saveFodt.launch("textolite-${stamp()}.fodt") },
                     onPdf = { savePdf.launch("textolite-${stamp()}.pdf") },
                     onCopy = {
+                        val all = pages.joinToString("\n\n") { it.text }
                         val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        cm.setPrimaryClip(ClipData.newPlainText("Textolite", text))
+                        cm.setPrimaryClip(ClipData.newPlainText("Textolite", all))
                         Toast.makeText(ctx, "Texto copiado", Toast.LENGTH_SHORT).show()
                     },
                     onShare = {
                         val send = Intent(Intent.ACTION_SEND).apply {
                             type = "text/plain"
-                            putExtra(Intent.EXTRA_TEXT, text)
+                            putExtra(Intent.EXTRA_TEXT, pages.joinToString("\n\n") { it.text })
                         }
                         ctx.startActivity(Intent.createChooser(send, null))
                     },
@@ -209,11 +265,14 @@ fun HomeScreen(
     settings: Settings,
     engine: Engine,
     onEngine: (Engine) -> Unit,
-    bitmap: Bitmap?,
+    pages: List<Page>,
     busy: Boolean,
+    progress: String?,
     error: String?,
     onCamera: () -> Unit,
     onGallery: () -> Unit,
+    onRemove: (Int) -> Unit,
+    onClear: () -> Unit,
     onRecognize: () -> Unit,
     onSettings: () -> Unit
 ) {
@@ -227,22 +286,34 @@ fun HomeScreen(
             TextButton(onClick = onSettings) { Text("Configurações") }
         }
 
-        if (bitmap != null) {
-            Image(
-                bitmap = bitmap.asImageBitmap(),
-                contentDescription = "Imagem selecionada",
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxWidth().height(280.dp)
-            )
-        } else {
+        if (pages.isEmpty()) {
             Text(
-                "Tire uma foto ou escolha uma imagem para converter em texto.",
+                "Tire fotos ou escolha imagens. Você pode juntar várias páginas num único documento.",
                 style = MaterialTheme.typography.bodyLarge
             )
+        } else {
+            Row(
+                Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                pages.forEachIndexed { i, p ->
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Image(
+                            bitmap = p.thumb.asImageBitmap(),
+                            contentDescription = "Página ${i + 1}",
+                            modifier = Modifier.height(130.dp)
+                        )
+                        Text("Página ${i + 1}", style = MaterialTheme.typography.bodySmall)
+                        TextButton(onClick = { onRemove(i) }, enabled = !busy) { Text("Remover") }
+                    }
+                }
+            }
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onCamera, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Tirar foto") }
+            Button(onClick = onCamera, enabled = !busy, modifier = Modifier.weight(1f)) {
+                Text(if (pages.isEmpty()) "Tirar foto" else "Adicionar foto")
+            }
             OutlinedButton(onClick = onGallery, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Galeria") }
         }
 
@@ -271,26 +342,35 @@ fun HomeScreen(
                 )
             else ->
                 Text(
-                    "A imagem será enviada ao serviço escolhido. Planos gratuitos podem usar o conteúdo para melhorar os modelos; evite documentos sensíveis.",
+                    "As imagens serão enviadas ao serviço escolhido. Planos gratuitos podem usar o conteúdo para melhorar os modelos; evite documentos sensíveis.",
                     style = MaterialTheme.typography.bodySmall
                 )
         }
 
         Button(
             onClick = onRecognize,
-            enabled = bitmap != null && !busy && ready,
+            enabled = pages.isNotEmpty() && !busy && ready,
             modifier = Modifier.fillMaxWidth()
-        ) { Text("Reconhecer texto") }
+        ) { Text(if (pages.size > 1) "Reconhecer ${pages.size} páginas" else "Reconhecer texto") }
+
+        if (pages.isNotEmpty()) {
+            TextButton(onClick = onClear, enabled = !busy) { Text("Limpar tudo e começar de novo") }
+        }
 
         if (busy) CircularProgressIndicator(Modifier.align(Alignment.CenterHorizontally))
+        if (progress != null) Text(progress, style = MaterialTheme.typography.bodySmall)
         if (error != null) Text(error, color = MaterialTheme.colorScheme.error)
     }
 }
 
 @Composable
 fun ResultScreen(
-    text: String,
-    onText: (String) -> Unit,
+    pages: List<Page>,
+    index: Int,
+    onIndex: (Int) -> Unit,
+    withImages: Boolean,
+    onWithImages: (Boolean) -> Unit,
+    busy: Boolean,
     onMd: () -> Unit,
     onFodt: () -> Unit,
     onPdf: () -> Unit,
@@ -298,19 +378,50 @@ fun ResultScreen(
     onShare: () -> Unit,
     onBack: () -> Unit
 ) {
+    if (pages.isEmpty()) {
+        Column(Modifier.fillMaxSize().padding(16.dp)) {
+            Text("Nenhuma página.")
+            TextButton(onClick = onBack) { Text("Voltar") }
+        }
+        return
+    }
+    val i = index.coerceIn(0, pages.size - 1)
+    val page = pages[i]
+
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Revise e edite o texto", style = MaterialTheme.typography.titleLarge)
+
+        if (pages.size > 1) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { onIndex(i - 1) }, enabled = i > 0) { Text("‹ Anterior") }
+                Text(
+                    "Página ${i + 1} de ${pages.size}",
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleSmall
+                )
+                TextButton(onClick = { onIndex(i + 1) }, enabled = i < pages.size - 1) { Text("Próxima ›") }
+            }
+        }
+
         OutlinedTextField(
-            value = text,
-            onValueChange = onText,
+            value = page.text,
+            onValueChange = { page.text = it },
             modifier = Modifier.fillMaxWidth().weight(1f)
         )
+
+        Text("O arquivo deve conter", style = MaterialTheme.typography.titleSmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(selected = !withImages, onClick = { onWithImages(false) }, label = { Text("Só o texto") })
+            FilterChip(selected = withImages, onClick = { onWithImages(true) }, label = { Text("Texto + imagem original") })
+        }
+
         Text("Salvar como", style = MaterialTheme.typography.titleSmall)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onMd, modifier = Modifier.weight(1f)) { Text(".md") }
-            Button(onClick = onFodt, modifier = Modifier.weight(1f)) { Text(".fodt") }
-            Button(onClick = onPdf, modifier = Modifier.weight(1f)) { Text(".pdf") }
+            Button(onClick = onMd, enabled = !busy, modifier = Modifier.weight(1f)) { Text(".md") }
+            Button(onClick = onFodt, enabled = !busy, modifier = Modifier.weight(1f)) { Text(".fodt") }
+            Button(onClick = onPdf, enabled = !busy, modifier = Modifier.weight(1f)) { Text(".pdf") }
         }
+        if (busy) CircularProgressIndicator(Modifier.align(Alignment.CenterHorizontally))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = onCopy, modifier = Modifier.weight(1f)) { Text("Copiar") }
             OutlinedButton(onClick = onShare, modifier = Modifier.weight(1f)) { Text("Compartilhar") }
