@@ -58,7 +58,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-enum class Screen { HOME, RESULT, SETTINGS }
+enum class Screen { HOME, RESULT, SETTINGS, CROP }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -96,6 +96,7 @@ fun App() {
     var engine by remember { mutableStateOf(settings.engine) }
     val pages = remember { mutableStateListOf<Page>() }
     var current by remember { mutableStateOf(0) }
+    var cropIndex by remember { mutableStateOf(0) }
     var withImages by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var progress by remember { mutableStateOf<String?>(null) }
@@ -122,13 +123,13 @@ fun App() {
 
     fun removePage(i: Int) {
         if (i in pages.indices) {
-            pages[i].file.delete()
+            pages[i].deleteFiles()
             pages.removeAt(i)
         }
     }
 
     fun clearAll() {
-        pages.forEach { it.file.delete() }
+        pages.forEach { it.deleteFiles() }
         pages.clear()
         current = 0
         error = null
@@ -161,6 +162,45 @@ fun App() {
             } finally {
                 busy = false
                 progress = null
+            }
+        }
+    }
+
+    fun applyCrop(l: Float, t: Float, r: Float, b: Float) {
+        val pg = pages.getOrNull(cropIndex) ?: return
+        busy = true
+        scope.launch {
+            try {
+                val res = withContext(Dispatchers.IO) { Ocr.cropFile(pg, l, t, r, b) }
+                pg.cropped?.delete()
+                pg.cropped = res.first
+                pg.thumb = res.second
+                pg.text = ""
+                screen = Screen.HOME
+            } catch (e: Exception) {
+                error = e.message ?: "Não foi possível recortar."
+                screen = Screen.HOME
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    fun restoreCrop() {
+        val pg = pages.getOrNull(cropIndex) ?: return
+        busy = true
+        scope.launch {
+            try {
+                val th = withContext(Dispatchers.IO) { Ocr.thumbOf(pg.original) }
+                pg.cropped?.delete()
+                pg.cropped = null
+                pg.thumb = th
+                pg.text = ""
+            } catch (e: Exception) {
+                error = e.message ?: "Não foi possível restaurar a foto."
+            } finally {
+                busy = false
+                screen = Screen.HOME
             }
         }
     }
@@ -219,6 +259,7 @@ fun App() {
                         pickImages.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                     },
                     onRemove = { removePage(it) },
+                    onCrop = { cropIndex = it; screen = Screen.CROP },
                     onClear = { clearAll() },
                     onRecognize = { recognize() },
                     onSettings = { screen = Screen.SETTINGS }
@@ -248,6 +289,20 @@ fun App() {
                     },
                     onBack = { screen = Screen.HOME }
                 )
+                Screen.CROP -> {
+                    val pg = pages.getOrNull(cropIndex)
+                    if (pg != null) {
+                        CropScreen(
+                            page = pg,
+                            busy = busy,
+                            onApply = { l, t, r, b -> applyCrop(l, t, r, b) },
+                            onRestore = { restoreCrop() },
+                            onCancel = { screen = Screen.HOME }
+                        )
+                    } else {
+                        Text("Página não encontrada.", modifier = Modifier.padding(16.dp))
+                    }
+                }
                 Screen.SETTINGS -> SettingsScreen(settings = settings, onDone = {
                     if (!settings.isReady(engine)) {
                         engine = Engine.OFFLINE
@@ -272,6 +327,7 @@ fun HomeScreen(
     onCamera: () -> Unit,
     onGallery: () -> Unit,
     onRemove: (Int) -> Unit,
+    onCrop: (Int) -> Unit,
     onClear: () -> Unit,
     onRecognize: () -> Unit,
     onSettings: () -> Unit
@@ -303,7 +359,11 @@ fun HomeScreen(
                             contentDescription = "Página ${i + 1}",
                             modifier = Modifier.height(130.dp)
                         )
-                        Text("Página ${i + 1}", style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            "Página ${i + 1}" + if (p.cropped != null) " (recortada)" else "",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        TextButton(onClick = { onCrop(i) }, enabled = !busy) { Text("Recortar") }
                         TextButton(onClick = { onRemove(i) }, enabled = !busy) { Text("Remover") }
                     }
                 }

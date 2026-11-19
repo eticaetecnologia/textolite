@@ -83,8 +83,12 @@ object Ocr {
         val dir = File(ctx.cacheDir, "pages").apply { mkdirs() }
         val file = File(dir, "p${System.nanoTime()}.jpg")
         file.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+        return Page(file, makeThumb(bmp))
+    }
+
+    private fun makeThumb(bmp: Bitmap): Bitmap {
         val s = 360f / maxOf(bmp.width, bmp.height)
-        val thumb = if (s < 1f) {
+        return if (s < 1f) {
             Bitmap.createScaledBitmap(
                 bmp,
                 (bmp.width * s).toInt().coerceAtLeast(1),
@@ -92,7 +96,25 @@ object Ocr {
                 true
             )
         } else bmp
-        return Page(file, thumb)
+    }
+
+    fun thumbOf(file: File): Bitmap =
+        makeThumb(BitmapFactory.decodeFile(file.path) ?: throw IOException("Imagem indisponível."))
+
+    /**
+     * Recorta a foto original na região (frações de 0 a 1) e devolve o novo arquivo e a miniatura.
+     * Não altera o estado da página; quem chama aplica o resultado.
+     */
+    fun cropFile(page: Page, l: Float, t: Float, r: Float, b: Float): Pair<File, Bitmap> {
+        val src = BitmapFactory.decodeFile(page.original.path) ?: throw IOException("Imagem indisponível.")
+        val x = (l * src.width).toInt().coerceIn(0, src.width - 1)
+        val y = (t * src.height).toInt().coerceIn(0, src.height - 1)
+        val w = ((r - l) * src.width).toInt().coerceIn(1, src.width - x)
+        val h = ((b - t) * src.height).toInt().coerceIn(1, src.height - y)
+        val bmp = Bitmap.createBitmap(src, x, y, w, h)
+        val out = File(page.original.parentFile, "c${System.nanoTime()}.jpg")
+        out.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+        return Pair(out, makeThumb(bmp))
     }
 
     private fun toBase64Jpeg(bmp: Bitmap): String {
