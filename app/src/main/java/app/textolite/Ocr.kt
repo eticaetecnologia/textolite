@@ -3,8 +3,11 @@ package app.textolite
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Color
+import android.graphics.pdf.PdfRenderer
 import android.graphics.Matrix
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import android.util.Base64
 import androidx.exifinterface.media.ExifInterface
 import com.google.mlkit.vision.common.InputImage
@@ -78,13 +81,66 @@ object Ocr {
     }
 
     /** Guarda a foto como uma página do documento (arquivo JPEG + miniatura). */
-    fun savePage(ctx: Context, uri: Uri): Page {
-        val bmp = loadBitmap(ctx, uri)
+    fun savePage(ctx: Context, uri: Uri): Page = persist(ctx, loadBitmap(ctx, uri))
+
+    private fun persist(ctx: Context, bmp: Bitmap): Page {
         val dir = File(ctx.cacheDir, "pages").apply { mkdirs() }
         val file = File(dir, "p${System.nanoTime()}.jpg")
         file.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 90, it) }
         return Page(file, makeThumb(bmp))
     }
+
+    // ---------- PDF (inclusive os que são só imagem) ----------
+
+    fun isPdf(ctx: Context, uri: Uri): Boolean =
+        ctx.contentResolver.getType(uri) == "application/pdf" || uri.toString().lowercase().endsWith(".pdf")
+
+    /** Copia o arquivo para o cache: o leitor de PDF precisa de um arquivo que permita busca. */
+    fun copyToCache(ctx: Context, uri: Uri): File {
+        val dir = File(ctx.cacheDir, "pdfs").apply { mkdirs() }
+        val f = File(dir, "in${System.nanoTime()}.pdf")
+        ctx.contentResolver.openInputStream(uri)?.use { input ->
+            f.outputStream().use { input.copyTo(it) }
+        } ?: throw IOException("Não foi possível abrir o arquivo.")
+        return f
+    }
+
+    private fun <T> withRenderer(pdf: File, block: (PdfRenderer) -> T): T {
+        try {
+            val fd = ParcelFileDescriptor.open(pdf, ParcelFileDescriptor.MODE_READ_ONLY)
+            try {
+                val renderer = PdfRenderer(fd)
+                try {
+                    return block(renderer)
+                } finally {
+                    renderer.close()
+                }
+            } finally {
+                fd.close()
+            }
+        } catch (e: SecurityException) {
+            throw IOException("PDF protegido por senha não é suportado.")
+        }
+    }
+
+    fun pdfPageCount(pdf: File): Int = withRenderer(pdf) { it.pageCount }
+
+    /** Desenha a página [index] do PDF como imagem e a guarda como uma página do documento. */
+    fun renderPdfPage(ctx: Context, pdf: File, index: Int, maxSide: Int = 2200): Page =
+        withRenderer(pdf) { renderer ->
+            val pg = renderer.openPage(index)
+            try {
+                val s = maxSide.toFloat() / maxOf(pg.width, pg.height)
+                val w = (pg.width * s).toInt().coerceAtLeast(1)
+                val h = (pg.height * s).toInt().coerceAtLeast(1)
+                val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                bmp.eraseColor(Color.WHITE)
+                pg.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                persist(ctx, bmp)
+            } finally {
+                pg.close()
+            }
+        }
 
     private fun makeThumb(bmp: Bitmap): Bitmap {
         val s = 360f / maxOf(bmp.width, bmp.height)

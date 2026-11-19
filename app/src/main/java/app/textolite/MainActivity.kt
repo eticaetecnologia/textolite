@@ -110,13 +110,27 @@ fun App() {
         scope.launch {
             try {
                 for (u in uris) {
-                    val p = withContext(Dispatchers.IO) { Ocr.savePage(ctx, u) }
-                    pages.add(p)
+                    if (Ocr.isPdf(ctx, u)) {
+                        progress = "Abrindo PDF…"
+                        val pdf = withContext(Dispatchers.IO) { Ocr.copyToCache(ctx, u) }
+                        try {
+                            val n = withContext(Dispatchers.IO) { Ocr.pdfPageCount(pdf) }
+                            for (i in 0 until n) {
+                                progress = "Convertendo página ${i + 1} de $n do PDF…"
+                                pages.add(withContext(Dispatchers.IO) { Ocr.renderPdfPage(ctx, pdf, i) })
+                            }
+                        } finally {
+                            pdf.delete()
+                        }
+                    } else {
+                        pages.add(withContext(Dispatchers.IO) { Ocr.savePage(ctx, u) })
+                    }
                 }
             } catch (e: Exception) {
-                error = e.message ?: "Não foi possível abrir a imagem."
+                error = e.message ?: "Não foi possível abrir o arquivo."
             } finally {
                 busy = false
+                progress = null
             }
         }
     }
@@ -231,6 +245,9 @@ fun App() {
     val pickImages = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris ->
         if (uris.isNotEmpty()) addPages(uris)
     }
+    val openFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) addPages(uris)
+    }
     val saveMd = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri ->
         if (uri != null) export(uri, Export::md)
     }
@@ -258,6 +275,7 @@ fun App() {
                     onGallery = {
                         pickImages.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                     },
+                    onFiles = { openFiles.launch(arrayOf("image/*", "application/pdf")) },
                     onRemove = { removePage(it) },
                     onCrop = { cropIndex = it; screen = Screen.CROP },
                     onClear = { clearAll() },
@@ -326,6 +344,7 @@ fun HomeScreen(
     error: String?,
     onCamera: () -> Unit,
     onGallery: () -> Unit,
+    onFiles: () -> Unit,
     onRemove: (Int) -> Unit,
     onCrop: (Int) -> Unit,
     onClear: () -> Unit,
@@ -344,7 +363,7 @@ fun HomeScreen(
 
         if (pages.isEmpty()) {
             Text(
-                "Tire fotos ou escolha imagens. Você pode juntar várias páginas num único documento.",
+                "Tire fotos, escolha imagens ou abra PDFs (inclusive os que são só imagem). Você pode juntar várias páginas num único documento.",
                 style = MaterialTheme.typography.bodyLarge
             )
         } else {
@@ -375,6 +394,9 @@ fun HomeScreen(
                 Text(if (pages.isEmpty()) "Tirar foto" else "Adicionar foto")
             }
             OutlinedButton(onClick = onGallery, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Galeria") }
+        }
+        OutlinedButton(onClick = onFiles, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+            Text("Abrir arquivos (imagens ou PDF)")
         }
 
         Text("Motor de reconhecimento", style = MaterialTheme.typography.titleSmall)
